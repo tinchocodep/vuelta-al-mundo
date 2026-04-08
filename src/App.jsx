@@ -814,6 +814,15 @@ export default function App() {
   const [nightMode, setNightMode] = useState(true);
   const [soundOn, setSoundOn] = useState(false);
   const [panel, setPanel] = useState(false);
+  const [showHints, setShowHints] = useState(true);
+
+  useEffect(() => {
+    if (!showHints) return;
+    const timer = setTimeout(() => setShowHints(false), 6000);
+    return () => clearTimeout(timer);
+  }, [showHints]);
+
+  const dismissHints = () => setShowHints(false);
 
   useEffect(() => { stRef.current = { speed, running, brightness: brightness / 100, theme, sparkle, nightMode }; }, [speed, running, brightness, theme, sparkle, nightMode]);
   useEffect(() => { if (soundOn) mkSound(audioRef); else stopSound(audioRef); return () => stopSound(audioRef); }, [soundOn]);
@@ -927,6 +936,49 @@ export default function App() {
         </div>
       </div>
 
+      {/* Onboarding hints */}
+      {showHints && (
+        <div onClick={dismissHints} style={{ position: "absolute", inset: 0, zIndex: 30, pointerEvents: "auto", animation: "hintFadeIn 0.8s ease" }}>
+          {/* FABs hint */}
+          <div style={{
+            position: "absolute", top: 90, right: 70,
+            background: nm ? "rgba(212,165,116,0.15)" : "rgba(0,0,0,0.08)",
+            backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+            border: `1px solid ${acc}`, borderRadius: 16, padding: "10px 16px",
+            color: txt, fontFamily: "'Palatino Linotype',serif", fontSize: 13,
+            maxWidth: 180, textAlign: "center",
+            boxShadow: nm ? "0 4px 24px rgba(0,0,0,0.5)" : "0 2px 12px rgba(0,0,0,0.15)",
+            animation: "hintPulse 2s ease-in-out infinite",
+          }}>
+            <div style={{ fontSize: 18, marginBottom: 4 }}>&#8592;</div>
+            Controles: pausa, sonido, modo y efectos
+          </div>
+
+          {/* Drawer hint */}
+          <div style={{
+            position: "absolute", bottom: 60, left: "50%", transform: "translateX(-50%)",
+            background: nm ? "rgba(212,165,116,0.15)" : "rgba(0,0,0,0.08)",
+            backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+            border: `1px solid ${acc}`, borderRadius: 16, padding: "10px 20px",
+            color: txt, fontFamily: "'Palatino Linotype',serif", fontSize: 13,
+            textAlign: "center", whiteSpace: "nowrap",
+            boxShadow: nm ? "0 4px 24px rgba(0,0,0,0.5)" : "0 2px 12px rgba(0,0,0,0.15)",
+            animation: "hintPulse 2s ease-in-out infinite 0.3s",
+          }}>
+            <div style={{ fontSize: 14, marginBottom: 4, animation: "hintBounce 1.5s ease-in-out infinite" }}>&#8593;</div>
+            Desliza hacia arriba para velocidad, brillo y temas
+          </div>
+
+          {/* Tap to dismiss */}
+          <div style={{
+            position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)",
+            color: txt, opacity: 0.3, fontFamily: "'Palatino Linotype',serif", fontSize: 10, letterSpacing: 2,
+          }}>
+            TOCA PARA CERRAR
+          </div>
+        </div>
+      )}
+
       <style>{`
         input[type="range"]::-webkit-slider-thumb {
           -webkit-appearance:none; appearance:none;
@@ -941,6 +993,9 @@ export default function App() {
           background:${acc}; border: 2px solid ${nm ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)"};
           cursor:pointer;
         }
+        @keyframes hintFadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes hintPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+        @keyframes hintBounce { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
         *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
         body{margin:0; overflow:hidden; overscroll-behavior:none;}
         html{overflow:hidden; overscroll-behavior:none;}
