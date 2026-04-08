@@ -11,7 +11,7 @@ const PAL = {
   ocean:    ["#0077b6","#00b4d8","#90e0ef","#48cae4","#023e8a","#0096c7","#ade8f4","#caf0f8","#00b4d8","#48cae4","#0077b6","#90e0ef","#023e8a","#0096c7","#ade8f4","#caf0f8"],
   aurora:   ["#6a0572","#ab83a1","#e6ccbe","#5c2d91","#b721ff","#21d4fd","#3a1c71","#d76d77","#ffaf7b","#642b73","#c6426e","#00c9ff","#92fe9d","#7f00ff","#e100ff","#7c4dff"],
 };
-const NC = 16, NS = 8, R = 7;
+const NC = 24, NS = 12, R = 7;
 
 /* ═══════════════════════════════════════════
    AMBIENT MUSIC BOX SOUND
@@ -21,44 +21,31 @@ function mkSound(ref) {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const master = ctx.createGain(); master.gain.value = 0.1; master.connect(ctx.destination);
-    // reverb via delay
     const delay = ctx.createDelay(); delay.delayTime.value = 0.3;
     const fb = ctx.createGain(); fb.gain.value = 0.25;
     delay.connect(fb); fb.connect(delay); delay.connect(master);
-
-    const chords = [
-      [523.25, 659.25, 783.99],
-      [587.33, 739.99, 880],
-      [493.88, 622.25, 739.99],
-      [523.25, 659.25, 783.99],
-    ];
+    const chords = [[523.25,659.25,783.99],[587.33,739.99,880],[493.88,622.25,739.99],[523.25,659.25,783.99]];
     let ci = 0;
     function play() {
       if (ctx.state === "closed") return;
       const notes = chords[ci % chords.length];
-      // Pad
       notes.forEach((f, i) => {
         const o = ctx.createOscillator(), g = ctx.createGain();
-        o.type = i === 0 ? "sine" : "triangle";
-        o.frequency.value = f * 0.25;
+        o.type = i === 0 ? "sine" : "triangle"; o.frequency.value = f * 0.25;
         g.gain.setValueAtTime(0, ctx.currentTime);
         g.gain.linearRampToValueAtTime(0.04, ctx.currentTime + 2);
         g.gain.linearRampToValueAtTime(0, ctx.currentTime + 7);
-        o.connect(g); g.connect(master); g.connect(delay);
-        o.start(); o.stop(ctx.currentTime + 7);
+        o.connect(g); g.connect(master); g.connect(delay); o.start(); o.stop(ctx.currentTime + 7);
       });
-      // Music box plinks
-      const plinks = [0.6, 1.4, 2.5, 3.3, 4.2];
-      plinks.forEach(t => {
+      [0.6,1.4,2.5,3.3,4.2].forEach(t => {
         setTimeout(() => {
           if (ctx.state === "closed") return;
-          const freq = notes[Math.floor(Math.random() * notes.length)] * (Math.random() > 0.5 ? 2 : 4);
+          const freq = notes[Math.floor(Math.random()*notes.length)] * (Math.random()>0.5?2:4);
           const o = ctx.createOscillator(), g = ctx.createGain();
           o.type = "sine"; o.frequency.value = freq;
           g.gain.setValueAtTime(0.08, ctx.currentTime);
           g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 2);
-          o.connect(g); g.connect(master); g.connect(delay);
-          o.start(); o.stop(ctx.currentTime + 2);
+          o.connect(g); g.connect(master); g.connect(delay); o.start(); o.stop(ctx.currentTime + 2);
         }, t * 1000);
       });
       ci++;
@@ -75,6 +62,116 @@ function stopSound(ref) {
 }
 
 /* ═══════════════════════════════════════════
+   PROCEDURAL ENV MAP (for realistic reflections)
+   ═══════════════════════════════════════════ */
+function makeEnvMap(renderer) {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+
+  const envScene = new THREE.Scene();
+  // Gradient sky dome
+  const skyGeo = new THREE.SphereGeometry(50, 32, 16);
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    vertexShader: `varying vec3 vPos; void main(){ vPos=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader: `
+      varying vec3 vPos;
+      void main(){
+        float h = normalize(vPos).y;
+        vec3 top = vec3(0.05, 0.1, 0.3);
+        vec3 mid = vec3(0.15, 0.2, 0.4);
+        vec3 bot = vec3(0.02, 0.03, 0.08);
+        vec3 c = h > 0.0 ? mix(mid, top, h) : mix(mid, bot, -h);
+        // Warm glow from below (ground bounce)
+        c += vec3(0.08, 0.04, 0.02) * max(0.0, -h + 0.3);
+        gl_FragColor = vec4(c, 1.0);
+      }`,
+  });
+  envScene.add(new THREE.Mesh(skyGeo, skyMat));
+  // Add some bright spots for specular highlights
+  const bulbGeo = new THREE.SphereGeometry(2, 8, 8);
+  const bulbMat = new THREE.MeshBasicMaterial({ color: 0xffffcc });
+  const b1 = new THREE.Mesh(bulbGeo, bulbMat); b1.position.set(20, 15, 10); envScene.add(b1);
+  const b2 = new THREE.Mesh(bulbGeo, bulbMat.clone()); b2.material.color.set(0xaaccff);
+  b2.position.set(-15, 20, -10); envScene.add(b2);
+
+  const rt = pmrem.fromScene(envScene, 0.04);
+  pmrem.dispose();
+  return rt.texture;
+}
+
+/* ═══════════════════════════════════════════
+   GONDOLA BUILDER — realistic enclosed capsule
+   ═══════════════════════════════════════════ */
+function buildGondola(color, envMap) {
+  const group = new THREE.Group();
+
+  // Main capsule body — rounded
+  const bodyShape = new THREE.Shape();
+  const w = 0.32, h = 0.5, r2 = 0.08;
+  bodyShape.moveTo(-w + r2, -h);
+  bodyShape.lineTo(w - r2, -h);
+  bodyShape.quadraticCurveTo(w, -h, w, -h + r2);
+  bodyShape.lineTo(w, h * 0.3);
+  bodyShape.quadraticCurveTo(w, h * 0.5, w * 0.7, h * 0.55);
+  bodyShape.lineTo(-w * 0.7, h * 0.55);
+  bodyShape.quadraticCurveTo(-w, h * 0.5, -w, h * 0.3);
+  bodyShape.lineTo(-w, -h + r2);
+  bodyShape.quadraticCurveTo(-w, -h, -w + r2, -h);
+
+  const extrudeSettings = { depth: 0.35, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.03, bevelSegments: 3 };
+  const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, extrudeSettings);
+  bodyGeo.center();
+
+  const bodyCol = new THREE.Color(color);
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: bodyCol,
+    roughness: 0.35,
+    metalness: 0.15,
+    envMap,
+    envMapIntensity: 0.8,
+  });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  group.add(body);
+
+  // Window band — glass strip
+  const windowGeo = new THREE.BoxGeometry(0.58, 0.18, 0.38);
+  const windowMat = new THREE.MeshStandardMaterial({
+    color: 0x88ccff,
+    roughness: 0.05,
+    metalness: 0.3,
+    transparent: true,
+    opacity: 0.5,
+    envMap,
+    envMapIntensity: 1.5,
+  });
+  const win = new THREE.Mesh(windowGeo, windowMat);
+  win.position.y = 0.08;
+  group.add(win);
+
+  // Roof cap
+  const roofGeo = new THREE.CylinderGeometry(0.22, 0.32, 0.06, 12);
+  const roofMat = new THREE.MeshStandardMaterial({ color: bodyCol.clone().multiplyScalar(0.6), roughness: 0.4, metalness: 0.5, envMap });
+  const roof = new THREE.Mesh(roofGeo, roofMat);
+  roof.position.y = 0.32;
+  group.add(roof);
+
+  // Floor
+  const floorGeo = new THREE.CylinderGeometry(0.3, 0.28, 0.04, 12);
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x1a1a2a, roughness: 0.7, metalness: 0.3, envMap });
+  const floor = new THREE.Mesh(floorGeo, floorMat);
+  floor.position.y = -0.3;
+  group.add(floor);
+
+  // Interior warm light
+  const intLight = new THREE.PointLight(new THREE.Color(color).lerp(new THREE.Color(0xffeedd), 0.5).getHex(), 0.4, 2.5);
+  intLight.position.y = 0;
+  group.add(intLight);
+
+  return { group, bodyMat, windowMat, intLight };
+}
+
+/* ═══════════════════════════════════════════
    THREE.JS SCENE BUILDER
    ═══════════════════════════════════════════ */
 function buildScene(el, stRef, camRef) {
@@ -83,276 +180,481 @@ function buildScene(el, stRef, camRef) {
   const dpr = Math.min(window.devicePixelRatio, mob ? 1.5 : 2);
 
   const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x060a18, 0.012);
 
-  const cam = new THREE.PerspectiveCamera(mob ? 58 : 45, W / H, 0.1, 300);
-  const camDist = mob ? 19 : 24;
-  cam.position.set(0, 4, camDist);
+  const cam = new THREE.PerspectiveCamera(mob ? 55 : 42, W / H, 0.1, 300);
+  const camDist = mob ? 22 : 28;
+  cam.position.set(0, 5, camDist);
 
-  const ren = new THREE.WebGLRenderer({ antialias: !mob, powerPreference: "high-performance" });
+  const ren = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
   ren.setSize(W, H); ren.setPixelRatio(dpr);
   ren.toneMapping = THREE.ACESFilmicToneMapping;
-  ren.toneMappingExposure = 1.4;
-  if (!mob) { ren.shadowMap.enabled = true; ren.shadowMap.type = THREE.PCFSoftShadowMap; }
+  ren.toneMappingExposure = 1.2;
+  ren.shadowMap.enabled = true;
+  ren.shadowMap.type = THREE.PCFSoftShadowMap;
+  ren.outputColorSpace = THREE.SRGBColorSpace;
   el.appendChild(ren.domElement);
   const cv = ren.domElement;
   cv.style.touchAction = "none";
 
+  // Environment map for reflections
+  const envMap = makeEnvMap(ren);
+  scene.environment = envMap;
+
   /* ─── SKY GRADIENT ─── */
-  const skyGeo = new THREE.SphereGeometry(120, 32, 16);
+  const skyGeo = new THREE.SphereGeometry(150, 64, 32);
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     uniforms: {
-      topColor: { value: new THREE.Color(0x000510) },
-      midColor: { value: new THREE.Color(0x0a1628) },
-      botColor: { value: new THREE.Color(0x1a2840) },
+      topColor: { value: new THREE.Color(0x000818) },
+      midColor: { value: new THREE.Color(0x0c1a35) },
+      botColor: { value: new THREE.Color(0x1a2850) },
+      horizonGlow: { value: new THREE.Color(0x2a1520) },
     },
     vertexShader: `varying vec3 vPos; void main(){ vPos=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
     fragmentShader: `
-      uniform vec3 topColor; uniform vec3 midColor; uniform vec3 botColor;
+      uniform vec3 topColor, midColor, botColor, horizonGlow;
       varying vec3 vPos;
       void main(){
         float h = normalize(vPos).y;
-        vec3 c = h > 0.0 ? mix(midColor, topColor, h) : mix(midColor, botColor, -h*0.5);
+        vec3 c;
+        if (h > 0.0) {
+          c = mix(midColor, topColor, smoothstep(0.0, 0.8, h));
+        } else {
+          c = mix(midColor, botColor, smoothstep(0.0, -0.5, h));
+        }
+        // Warm horizon glow
+        float horizonFactor = exp(-abs(h) * 8.0);
+        c += horizonGlow * horizonFactor * 0.5;
         gl_FragColor = vec4(c, 1.0);
       }`,
   });
   scene.add(new THREE.Mesh(skyGeo, skyMat));
 
   /* ─── STARS ─── */
-  const nStar = mob ? 300 : 800;
+  const nStar = mob ? 400 : 1200;
   const stGeo = new THREE.BufferGeometry();
   const stPos = new Float32Array(nStar * 3);
   const stSizes = new Float32Array(nStar);
+  const stBright = new Float32Array(nStar);
   for (let i = 0; i < nStar; i++) {
     const theta = Math.random() * Math.PI * 2;
-    const phi = Math.random() * Math.PI * 0.45;
-    const r2 = 80 + Math.random() * 30;
-    stPos[i*3] = r2 * Math.sin(phi) * Math.cos(theta);
-    stPos[i*3+1] = r2 * Math.cos(phi) + 10;
-    stPos[i*3+2] = r2 * Math.sin(phi) * Math.sin(theta);
-    stSizes[i] = Math.random() * 2 + 0.5;
+    const phi = Math.random() * Math.PI * 0.5;
+    const r3 = 90 + Math.random() * 40;
+    stPos[i*3] = r3 * Math.sin(phi) * Math.cos(theta);
+    stPos[i*3+1] = r3 * Math.cos(phi) + 10;
+    stPos[i*3+2] = r3 * Math.sin(phi) * Math.sin(theta);
+    stSizes[i] = Math.random() * 2.5 + 0.3;
+    stBright[i] = Math.random();
   }
   stGeo.setAttribute("position", new THREE.BufferAttribute(stPos, 3));
   stGeo.setAttribute("size", new THREE.BufferAttribute(stSizes, 1));
+  stGeo.setAttribute("brightness", new THREE.BufferAttribute(stBright, 1));
   const starMat = new THREE.ShaderMaterial({
-    transparent: true,
+    transparent: true, depthWrite: false,
     uniforms: { time: { value: 0 } },
     vertexShader: `
-      attribute float size; varying float vSize; uniform float time;
+      attribute float size; attribute float brightness;
+      varying float vSize; varying float vBright;
       void main(){
-        vSize = size;
+        vSize = size; vBright = brightness;
         vec4 mv = modelViewMatrix * vec4(position,1.0);
-        gl_PointSize = size * (200.0 / -mv.z);
+        gl_PointSize = size * (250.0 / -mv.z);
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
-      varying float vSize; uniform float time;
+      varying float vSize; varying float vBright;
+      uniform float time;
       void main(){
         float d = length(gl_PointCoord - 0.5) * 2.0;
-        float a = smoothstep(1.0, 0.0, d) * (0.5 + 0.5 * sin(time * 1.5 + vSize * 10.0));
-        gl_FragColor = vec4(0.9, 0.92, 1.0, a * 0.9);
+        float core = exp(-d * d * 8.0);
+        float halo = exp(-d * d * 2.0) * 0.3;
+        float twinkle = 0.6 + 0.4 * sin(time * (1.0 + vBright * 3.0) + vBright * 50.0);
+        float a = (core + halo) * twinkle;
+        vec3 c = mix(vec3(0.8, 0.85, 1.0), vec3(1.0, 0.95, 0.8), vBright);
+        gl_FragColor = vec4(c, a * 0.85);
       }`,
   });
   const starPts = new THREE.Points(stGeo, starMat); scene.add(starPts);
 
-  /* ─── LIGHTS ─── */
-  scene.add(new THREE.AmbientLight(0x1a2040, 0.6));
-  const moon = new THREE.DirectionalLight(0x6688bb, 0.4);
-  moon.position.set(-15, 25, 10); if (!mob) moon.castShadow = true; scene.add(moon);
-  const warmL = new THREE.PointLight(0xffaa44, 0.8, 35); warmL.position.set(0, -2, 10); scene.add(warmL);
-  const fillL = new THREE.PointLight(0x4466aa, 0.3, 30); fillL.position.set(-10, 5, -5); scene.add(fillL);
+  /* ─── LIGHTS — cinematic 3-point + practicals ─── */
+  // Ambient fill
+  const ambLight = new THREE.AmbientLight(0x1a2040, 0.4);
+  scene.add(ambLight);
+
+  // Key light — moonlight from above-right
+  const keyLight = new THREE.DirectionalLight(0x6688cc, 0.6);
+  keyLight.position.set(-10, 30, 15);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(2048, 2048);
+  keyLight.shadow.camera.near = 1; keyLight.shadow.camera.far = 60;
+  keyLight.shadow.camera.left = -15; keyLight.shadow.camera.right = 15;
+  keyLight.shadow.camera.top = 20; keyLight.shadow.camera.bottom = -10;
+  keyLight.shadow.bias = -0.001;
+  keyLight.shadow.radius = 4;
+  scene.add(keyLight);
+
+  // Fill light — warm from below-front
+  const fillLight = new THREE.PointLight(0xffaa55, 0.6, 40);
+  fillLight.position.set(0, -3, 12);
+  scene.add(fillLight);
+
+  // Rim light — cool from behind
+  const rimLight = new THREE.PointLight(0x4466cc, 0.4, 35);
+  rimLight.position.set(-12, 8, -10);
+  scene.add(rimLight);
+
+  // Practical warm lights at base
+  const baseWarm1 = new THREE.PointLight(0xff8844, 0.5, 12);
+  baseWarm1.position.set(-3, -3.5, 3);
+  scene.add(baseWarm1);
+  const baseWarm2 = new THREE.PointLight(0xff8844, 0.5, 12);
+  baseWarm2.position.set(3, -3.5, 3);
+  scene.add(baseWarm2);
 
   /* ─── GROUND ─── */
-  const gndMat = new THREE.MeshStandardMaterial({ color: 0x0d1520, roughness: 0.95, metalness: 0.05 });
-  const gnd = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), gndMat);
+  // Main ground plane with subtle texture
+  const gndGeo = new THREE.PlaneGeometry(120, 120, 64, 64);
+  // Displace slightly for terrain feel
+  const gndPos = gndGeo.attributes.position;
+  for (let i = 0; i < gndPos.count; i++) {
+    const x = gndPos.getX(i), z = gndPos.getY(i);
+    const dist = Math.sqrt(x*x + z*z);
+    if (dist > 8) {
+      gndPos.setZ(i, (Math.sin(x*0.3)*Math.cos(z*0.4)*0.15 + Math.random()*0.02));
+    }
+  }
+  gndGeo.computeVertexNormals();
+  const gndMat = new THREE.MeshStandardMaterial({
+    color: 0x0e1822,
+    roughness: 0.85,
+    metalness: 0.05,
+    envMap,
+    envMapIntensity: 0.3,
+  });
+  const gnd = new THREE.Mesh(gndGeo, gndMat);
   gnd.rotation.x = -Math.PI / 2; gnd.position.y = -4.5;
-  if (!mob) gnd.receiveShadow = true; scene.add(gnd);
+  gnd.receiveShadow = true; scene.add(gnd);
 
-  // Reflective puddle
-  const puddle = new THREE.Mesh(
-    new THREE.CircleGeometry(6, 32),
-    new THREE.MeshStandardMaterial({ color: 0x0a1525, roughness: 0.05, metalness: 0.95 })
-  );
-  puddle.rotation.x = -Math.PI / 2; puddle.position.set(0, -4.48, 8); scene.add(puddle);
+  // Paved area under the wheel
+  const pavedGeo = new THREE.CircleGeometry(11, 48);
+  const pavedMat = new THREE.MeshStandardMaterial({
+    color: 0x1a1e28,
+    roughness: 0.6,
+    metalness: 0.1,
+    envMap,
+    envMapIntensity: 0.5,
+  });
+  const paved = new THREE.Mesh(pavedGeo, pavedMat);
+  paved.rotation.x = -Math.PI / 2; paved.position.y = -4.48;
+  paved.receiveShadow = true; scene.add(paved);
 
-  /* ─── FLOATING PARTICLES (dust/fireflies) ─── */
-  const nPart = mob ? 40 : 80;
+  // Reflective wet puddle
+  const puddleGeo = new THREE.CircleGeometry(4.5, 48);
+  const puddleMat = new THREE.MeshStandardMaterial({
+    color: 0x0a1520,
+    roughness: 0.02,
+    metalness: 0.95,
+    envMap,
+    envMapIntensity: 2.0,
+  });
+  const puddle = new THREE.Mesh(puddleGeo, puddleMat);
+  puddle.rotation.x = -Math.PI / 2; puddle.position.set(2, -4.47, 9);
+  scene.add(puddle);
+
+  /* ─── FLOATING PARTICLES ─── */
+  const nPart = mob ? 50 : 100;
   const partGeo = new THREE.BufferGeometry();
   const partPos = new Float32Array(nPart * 3);
   const partVel = [];
   for (let i = 0; i < nPart; i++) {
-    partPos[i*3] = (Math.random() - 0.5) * 20;
-    partPos[i*3+1] = Math.random() * 15 - 3;
-    partPos[i*3+2] = (Math.random() - 0.5) * 20;
-    partVel.push({ x: (Math.random()-0.5)*0.005, y: Math.random()*0.008+0.002, z: (Math.random()-0.5)*0.005 });
+    partPos[i*3] = (Math.random()-0.5)*24;
+    partPos[i*3+1] = Math.random()*18 - 4;
+    partPos[i*3+2] = (Math.random()-0.5)*24;
+    partVel.push({ x:(Math.random()-0.5)*0.004, y:Math.random()*0.006+0.001, z:(Math.random()-0.5)*0.004 });
   }
   partGeo.setAttribute("position", new THREE.BufferAttribute(partPos, 3));
-  const partMat = new THREE.PointsMaterial({ color: 0xffeebb, size: mob ? 0.08 : 0.06, transparent: true, opacity: 0.6 });
+  const partMat = new THREE.PointsMaterial({ color: 0xffeebb, size: 0.05, transparent: true, opacity: 0.5, depthWrite: false });
   const particles = new THREE.Points(partGeo, partMat); scene.add(particles);
 
   /* ═══════════════════════════════════════════
-     FERRIS WHEEL
+     FERRIS WHEEL — realistic steel structure
      ═══════════════════════════════════════════ */
   const wheel = new THREE.Group(); wheel.position.y = 3.5; scene.add(wheel);
 
-  // Metal material with warm copper tone
-  const copper = new THREE.MeshStandardMaterial({ color: 0xd4a574, roughness: 0.25, metalness: 0.85 });
-  const copperDark = new THREE.MeshStandardMaterial({ color: 0x8b6914, roughness: 0.35, metalness: 0.7 });
+  // Steel materials
+  const steelLight = new THREE.MeshStandardMaterial({
+    color: 0xc8c8d0, roughness: 0.25, metalness: 0.9, envMap, envMapIntensity: 1.2,
+  });
+  const steelDark = new THREE.MeshStandardMaterial({
+    color: 0x888890, roughness: 0.35, metalness: 0.85, envMap, envMapIntensity: 1.0,
+  });
+  const steelWarm = new THREE.MeshStandardMaterial({
+    color: 0xb0a090, roughness: 0.3, metalness: 0.8, envMap, envMapIntensity: 1.0,
+  });
 
-  // Outer rim
-  const rimSegs = mob ? 48 : 80;
-  wheel.add(new THREE.Mesh(new THREE.TorusGeometry(R, 0.1, 12, rimSegs), copper));
-  // Decorative inner rim
-  wheel.add(new THREE.Mesh(new THREE.TorusGeometry(R - 0.25, 0.035, 8, rimSegs), copperDark));
-  // Tiny outer decorative ring
-  wheel.add(new THREE.Mesh(new THREE.TorusGeometry(R + 0.15, 0.02, 6, rimSegs), copperDark));
+  // Outer rim — thick structural ring
+  const rimSegs = mob ? 64 : 96;
+  const outerRim = new THREE.Mesh(new THREE.TorusGeometry(R, 0.14, 16, rimSegs), steelLight);
+  outerRim.castShadow = true;
+  wheel.add(outerRim);
+  // Inner decorative rim
+  wheel.add(new THREE.Mesh(new THREE.TorusGeometry(R - 0.22, 0.06, 10, rimSegs), steelDark));
+  // Outer rail
+  wheel.add(new THREE.Mesh(new THREE.TorusGeometry(R + 0.18, 0.04, 8, rimSegs), steelDark));
 
-  // Hub - more detailed
-  const hubG = new THREE.Group();
-  hubG.add(new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.5, 20), copper));
-  hubG.add(new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.05, 8, 20), copper));
-  hubG.children[0].rotation.x = Math.PI / 2;
-  // Center gem
-  const centerGem = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.2, 1),
-    new THREE.MeshStandardMaterial({ color: 0xc77dff, emissive: 0xc77dff, emissiveIntensity: 0.8, roughness: 0.1, metalness: 0.6 })
+  // Hub — detailed multi-part center
+  const hubGroup = new THREE.Group();
+  // Main hub cylinder
+  const hubBody = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 0.7, 24), steelLight);
+  hubBody.rotation.x = Math.PI / 2;
+  hubBody.castShadow = true;
+  hubGroup.add(hubBody);
+  // Hub flanges
+  [-0.38, 0.38].forEach(z => {
+    const flange = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 0.06, 24), steelDark);
+    flange.rotation.x = Math.PI / 2; flange.position.z = z;
+    hubGroup.add(flange);
+  });
+  // Hub bolts
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.08, 8), steelWarm);
+    bolt.rotation.x = Math.PI / 2;
+    bolt.position.set(Math.cos(a) * 0.65, Math.sin(a) * 0.65, 0.4);
+    hubGroup.add(bolt);
+  }
+  // Center axle cap
+  const axleCap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.15, 12, 12),
+    new THREE.MeshStandardMaterial({ color: 0xddddee, roughness: 0.1, metalness: 0.95, envMap, envMapIntensity: 2.0 })
   );
-  hubG.add(centerGem);
-  wheel.add(hubG);
+  axleCap.position.z = 0.42;
+  hubGroup.add(axleCap);
+  wheel.add(hubGroup);
 
-  // Spokes - double for realism
+  // Spokes — double parallel with cross-bracing for realism
   for (let i = 0; i < NS; i++) {
     const a = (i / NS) * Math.PI * 2;
-    [-0.08, 0.08].forEach(offset => {
-      const s = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, R - 0.3, 6), copper);
-      s.position.set(Math.cos(a) * (R/2), Math.sin(a) * (R/2), offset);
-      s.rotation.z = a - Math.PI / 2;
-      wheel.add(s);
+    const cosA = Math.cos(a), sinA = Math.sin(a);
+    const spokeLen = R - 0.5;
+
+    // Main parallel spokes
+    [-0.12, 0.12].forEach(offset => {
+      const spoke = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, 0.04, spokeLen, 8),
+        steelLight
+      );
+      spoke.position.set(cosA * (spokeLen / 2 + 0.25), sinA * (spokeLen / 2 + 0.25), offset);
+      spoke.rotation.z = a - Math.PI / 2;
+      spoke.castShadow = true;
+      wheel.add(spoke);
     });
+
+    // Cross braces between parallel spokes (3 per spoke pair)
+    for (let j = 1; j <= 3; j++) {
+      const frac = j / 4;
+      const brace = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.015, 0.015, 0.24, 6),
+        steelDark
+      );
+      brace.position.set(cosA * (frac * spokeLen + 0.25), sinA * (frac * spokeLen + 0.25), 0);
+      brace.rotation.x = Math.PI / 2;
+      wheel.add(brace);
+    }
   }
 
-  // LED bars on spokes — glowing tubes
+  // LED accent strips on alternate spokes
   const bars = [];
   const initCols = PAL.carnival;
   for (let i = 0; i < NS; i++) {
     const a = (i / NS) * Math.PI * 2;
-    const c = new THREE.Color(initCols[i * 2 % 16]);
+    const c = new THREE.Color(initCols[i % 16]);
     const tubeMat = new THREE.MeshStandardMaterial({
-      color: c, emissive: c, emissiveIntensity: 1.0,
-      transparent: true, opacity: 0.85, roughness: 0.1,
+      color: c, emissive: c, emissiveIntensity: 0.6,
+      transparent: true, opacity: 0.8, roughness: 0.15,
     });
-    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.8, 8), tubeMat);
-    tube.position.set(Math.cos(a) * R * 0.5, Math.sin(a) * R * 0.5, 0);
+    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 2.5, 8), tubeMat);
+    tube.position.set(Math.cos(a) * R * 0.45, Math.sin(a) * R * 0.45, 0.18);
     tube.rotation.z = a - Math.PI / 2;
     wheel.add(tube); bars.push(tube);
   }
 
-  // Cabin gems — crystal-like with glow spheres
-  const cabins = [], gondolas = [], cabinLights = [];
+  // Rim LED lights — small bulbs around the outer rim
+  const rimLEDs = [];
+  const numRimLEDs = mob ? 48 : 72;
+  for (let i = 0; i < numRimLEDs; i++) {
+    const a = (i / numRimLEDs) * Math.PI * 2;
+    const c = new THREE.Color(initCols[i % 16]);
+    const ledMat = new THREE.MeshStandardMaterial({
+      color: c, emissive: c, emissiveIntensity: 1.2, roughness: 0.1,
+    });
+    const led = new THREE.Mesh(new THREE.SphereGeometry(0.04, 6, 6), ledMat);
+    led.position.set(Math.cos(a) * (R + 0.22), Math.sin(a) * (R + 0.22), 0);
+    wheel.add(led);
+    rimLEDs.push(led);
+  }
+
+  // Gondolas — realistic enclosed capsules
+  const cabinData = [];
   for (let i = 0; i < NC; i++) {
     const a = (i / NC) * Math.PI * 2;
-    const c = new THREE.Color(initCols[i % 16]);
+    const c = initCols[i % 16];
+    const gondola = buildGondola(c, envMap);
 
-    // Gem
-    const gemMat = new THREE.MeshStandardMaterial({
-      color: c, emissive: c, emissiveIntensity: 1.5,
-      roughness: 0.05, metalness: 0.7, transparent: true, opacity: 0.95,
+    // Hanger arm — the bracket connecting gondola to rim
+    const hangerGroup = new THREE.Group();
+
+    // Y-shaped hanger
+    const armMain = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.8, 8), steelLight);
+    armMain.position.y = 0.4;
+    hangerGroup.add(armMain);
+
+    // Fork arms
+    [-0.12, 0.12].forEach(xOff => {
+      const fork = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.35, 6), steelDark);
+      fork.position.set(xOff, 0.88, 0);
+      fork.rotation.z = xOff > 0 ? -0.25 : 0.25;
+      hangerGroup.add(fork);
     });
-    const gem = new THREE.Mesh(new THREE.IcosahedronGeometry(0.28, 1), gemMat);
-    gem.position.set(Math.cos(a) * R, Math.sin(a) * R, 0);
-    wheel.add(gem); cabins.push(gem);
 
-    // Glow sphere around gem
-    const glowMat = new THREE.MeshBasicMaterial({
-      color: c, transparent: true, opacity: 0.12,
+    // Pivot bolt at top
+    const pivot = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), steelWarm);
+    pivot.position.y = 1.05;
+    hangerGroup.add(pivot);
+
+    gondola.group.position.y = -0.1;
+    hangerGroup.add(gondola.group);
+
+    // Position on rim
+    hangerGroup.position.set(Math.cos(a) * R, Math.sin(a) * R, 0);
+    wheel.add(hangerGroup);
+
+    cabinData.push({
+      hanger: hangerGroup,
+      gondola,
+      angle: a,
     });
-    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.6, 12, 12), glowMat);
-    glow.position.copy(gem.position);
-    wheel.add(glow);
-
-    // Point light per cabin
-    const pl = new THREE.PointLight(c.getHex(), mob ? 0.3 : 0.5, mob ? 3 : 4.5);
-    pl.position.copy(gem.position);
-    wheel.add(pl); cabinLights.push({ light: pl, glow });
-
-    // Wire
-    const wire = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.5, 4), copperDark);
-    wire.position.set(Math.cos(a) * R, Math.sin(a) * R - 0.4, 0);
-    wheel.add(wire);
-
-    // Gondola — rounded box-like
-    const gonMat = new THREE.MeshStandardMaterial({ color: c.clone().multiplyScalar(0.5), roughness: 0.5, metalness: 0.4 });
-    const gon = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 6), gonMat);
-    gon.scale.set(1.8, 0.8, 1.2);
-    gon.position.set(Math.cos(a) * R, Math.sin(a) * R - 0.7, 0);
-    wheel.add(gon); gondolas.push(gon);
   }
 
-  /* ─── SUPPORT STRUCTURE ─── */
-  const legMat = new THREE.MeshStandardMaterial({ color: 0xd4a574, roughness: 0.3, metalness: 0.75 });
-  const legGeo = new THREE.CylinderGeometry(0.1, 0.14, 13, 8);
-  [[-2.8, 1.8, 0.2, -0.11], [2.8, 1.8, -0.2, -0.11], [-2.8, -1.8, 0.2, 0.11], [2.8, -1.8, -0.2, 0.11]]
-    .forEach(([x, z, rz, rx]) => {
-      const l = new THREE.Mesh(legGeo, legMat);
-      l.position.set(x, -1, z); l.rotation.z = rz; l.rotation.x = rx;
-      if (!mob) l.castShadow = true; scene.add(l);
-    });
-
-  // X-braces
-  const brGeo = new THREE.CylinderGeometry(0.035, 0.035, 6, 6);
-  [1.8, -1.8].forEach(z => {
-    const b = new THREE.Mesh(brGeo, legMat);
-    b.position.set(0, 0.5, z); b.rotation.z = Math.PI / 2; scene.add(b);
-  });
-  // Diagonal braces
-  [1.8, -1.8].forEach(z => {
-    const d = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 7, 4), copperDark);
-    d.position.set(0, -1.5, z); d.rotation.z = 0.6; scene.add(d);
-    const d2 = d.clone(); d2.rotation.z = -0.6; scene.add(d2);
+  /* ─── SUPPORT STRUCTURE — A-frame with cross bracing ─── */
+  const legMat = new THREE.MeshStandardMaterial({
+    color: 0xaaaabc, roughness: 0.3, metalness: 0.85, envMap, envMapIntensity: 1.0,
   });
 
-  // Base
-  const baseMat = new THREE.MeshStandardMaterial({ color: 0x1e1e30, roughness: 0.7, metalness: 0.2 });
-  const base = new THREE.Mesh(new THREE.BoxGeometry(9, 0.35, 5), baseMat);
-  base.position.y = -4.35; if (!mob) base.receiveShadow = true; scene.add(base);
+  // Main A-frame legs (4 legs, front and back pairs)
+  const legGeo = new THREE.CylinderGeometry(0.12, 0.18, 14, 12);
+  const legConfigs = [
+    { x: -3.2, z: 2.2, rz: 0.18, rx: -0.09 },
+    { x: 3.2, z: 2.2, rz: -0.18, rx: -0.09 },
+    { x: -3.2, z: -2.2, rz: 0.18, rx: 0.09 },
+    { x: 3.2, z: -2.2, rz: -0.18, rx: 0.09 },
+  ];
+  legConfigs.forEach(({ x, z, rz, rx }) => {
+    const leg = new THREE.Mesh(legGeo, legMat);
+    leg.position.set(x, -0.5, z); leg.rotation.z = rz; leg.rotation.x = rx;
+    leg.castShadow = true; scene.add(leg);
+  });
 
-  // Base edge trim — golden
-  const trim = new THREE.Mesh(new THREE.BoxGeometry(9.1, 0.06, 5.1), copper);
-  trim.position.y = -4.15; scene.add(trim);
+  // Horizontal cross beams
+  const beamGeo = new THREE.CylinderGeometry(0.06, 0.06, 6.4, 10);
+  [2.2, -2.2].forEach(z => {
+    // Upper beam
+    const upper = new THREE.Mesh(beamGeo, legMat);
+    upper.position.set(0, 2, z); upper.rotation.z = Math.PI / 2;
+    upper.castShadow = true; scene.add(upper);
+    // Lower beam
+    const lower = new THREE.Mesh(beamGeo, legMat);
+    lower.position.set(0, -2, z); lower.rotation.z = Math.PI / 2;
+    lower.castShadow = true; scene.add(lower);
+  });
 
-  // PCB boards
-  for (let i = 0; i < 4; i++) {
-    const pcb = new THREE.Mesh(
-      new THREE.BoxGeometry(0.9, 0.1, 0.6),
-      new THREE.MeshStandardMaterial({ color: 0x0a5a0a, roughness: 0.6 })
+  // Diagonal X-braces on each side
+  const diagGeo = new THREE.CylinderGeometry(0.025, 0.025, 7.5, 6);
+  [2.2, -2.2].forEach(z => {
+    const d1 = new THREE.Mesh(diagGeo, steelDark);
+    d1.position.set(0, 0, z); d1.rotation.z = 0.55;
+    scene.add(d1);
+    const d2 = new THREE.Mesh(diagGeo, steelDark);
+    d2.position.set(0, 0, z); d2.rotation.z = -0.55;
+    scene.add(d2);
+  });
+
+  // Front-to-back braces
+  const fbGeo = new THREE.CylinderGeometry(0.04, 0.04, 4.4, 8);
+  [[-2.5, 2], [2.5, 2], [-2.5, -2], [2.5, -2], [0, 3.5]].forEach(([x, y]) => {
+    const fb = new THREE.Mesh(fbGeo, steelDark);
+    fb.position.set(x, y, 0); fb.rotation.x = Math.PI / 2;
+    scene.add(fb);
+  });
+
+  // Axle through the hub
+  const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 5.5, 16), steelLight);
+  axle.rotation.x = Math.PI / 2; axle.position.y = 3.5;
+  axle.castShadow = true; scene.add(axle);
+
+  // Base platform — concrete look
+  const baseMat = new THREE.MeshStandardMaterial({
+    color: 0x2a2a35, roughness: 0.75, metalness: 0.1, envMap, envMapIntensity: 0.3,
+  });
+  const base = new THREE.Mesh(new THREE.BoxGeometry(10, 0.5, 6), baseMat);
+  base.position.y = -4.35; base.receiveShadow = true; base.castShadow = true; scene.add(base);
+
+  // Base edge — metal trim
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.25, metalness: 0.9, envMap });
+  const trim = new THREE.Mesh(new THREE.BoxGeometry(10.1, 0.08, 6.1), trimMat);
+  trim.position.y = -4.08; scene.add(trim);
+
+  // Foot plates at leg bases
+  legConfigs.forEach(({ x, z }) => {
+    const plate = new THREE.Mesh(
+      new THREE.BoxGeometry(0.8, 0.1, 0.8),
+      new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.4, metalness: 0.8, envMap })
     );
-    pcb.position.set(-2.7 + i * 1.8, -4.07, 1.5); scene.add(pcb);
-    // LED on PCB
-    const ledC = [0xff0000, 0x00ff00, 0x00ff00, 0xffaa00][i];
-    const ledB = new THREE.Mesh(
-      new THREE.SphereGeometry(0.04, 6, 6),
-      new THREE.MeshStandardMaterial({ color: ledC, emissive: ledC, emissiveIntensity: 3 })
-    );
-    ledB.position.set(-2.5 + i * 1.8, -4.0, 1.6); scene.add(ledB);
-  }
+    plate.position.set(x, -4.05, z); scene.add(plate);
+    // Bolts on plate
+    for (let bx = -0.25; bx <= 0.25; bx += 0.5) {
+      for (let bz = -0.25; bz <= 0.25; bz += 0.5) {
+        const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.06, 6), steelWarm);
+        bolt.position.set(x + bx, -3.97, z + bz); scene.add(bolt);
+      }
+    }
+  });
 
   // Ground ring of fairy lights
-  const numBulbs = mob ? 20 : 32;
+  const numBulbs = mob ? 28 : 48;
   const gBulbs = [];
   for (let i = 0; i < numBulbs; i++) {
     const a = (i / numBulbs) * Math.PI * 2;
     const col = new THREE.Color(initCols[i % 16]);
-    const bm = new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.6, roughness: 0.2 });
-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), bm);
-    bulb.position.set(Math.cos(a) * 10, -4.3, Math.sin(a) * 10);
+    const bulbMat = new THREE.MeshStandardMaterial({
+      color: col, emissive: col, emissiveIntensity: 0.5, roughness: 0.2,
+    });
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), bulbMat);
+    bulb.position.set(Math.cos(a) * 10.5, -4.3, Math.sin(a) * 10.5);
     scene.add(bulb); gBulbs.push(bulb);
-    // Wire to ground
+    // Wire posts
     if (i % 2 === 0) {
-      const w = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.5, 3),
-        new THREE.MeshStandardMaterial({ color: 0x333333 }));
-      w.position.set(Math.cos(a) * 10, -4.55, Math.sin(a) * 10);
-      scene.add(w);
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.6, 4), steelDark);
+      post.position.set(Math.cos(a) * 10.5, -4.6, Math.sin(a) * 10.5);
+      scene.add(post);
     }
+  }
+
+  // Wire catenary between bulbs
+  for (let i = 0; i < numBulbs; i++) {
+    const a1 = (i / numBulbs) * Math.PI * 2;
+    const a2 = ((i + 1) / numBulbs) * Math.PI * 2;
+    const wirePts = [];
+    for (let t = 0; t <= 1; t += 0.2) {
+      const a = a1 + (a2 - a1) * t;
+      const sag = Math.sin(t * Math.PI) * 0.08;
+      wirePts.push(new THREE.Vector3(Math.cos(a) * 10.5, -4.25 + sag, Math.sin(a) * 10.5));
+    }
+    const wireCurve = new THREE.CatmullRomCurve3(wirePts);
+    const wireGeo = new THREE.TubeGeometry(wireCurve, 4, 0.008, 4, false);
+    const wire = new THREE.Mesh(wireGeo, new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 }));
+    scene.add(wire);
   }
 
   /* ─── TOUCH / MOUSE ORBIT ─── */
@@ -380,7 +682,7 @@ function buildScene(el, stRef, camRef) {
 
     // Inertia + auto orbit
     if (!drag && Math.abs(vx) > 0.00005) { camRef.current += vx; vx *= 0.96; }
-    if (!drag && Math.abs(vx) < 0.00005) camRef.current += 0.0006;
+    if (!drag && Math.abs(vx) < 0.00005) camRef.current += 0.0004;
 
     // Wheel rotation
     if (st.running) wheel.rotation.z -= st.speed * dt * 0.5;
@@ -394,63 +696,91 @@ function buildScene(el, stRef, camRef) {
       pp[i*3] += partVel[i].x;
       pp[i*3+1] += partVel[i].y * (0.5 + Math.sin(t + i) * 0.5);
       pp[i*3+2] += partVel[i].z;
-      if (pp[i*3+1] > 14) { pp[i*3+1] = -3; pp[i*3] = (Math.random()-0.5)*20; pp[i*3+2] = (Math.random()-0.5)*20; }
+      if (pp[i*3+1] > 16) { pp[i*3+1] = -4; pp[i*3] = (Math.random()-0.5)*24; pp[i*3+2] = (Math.random()-0.5)*24; }
     }
     particles.geometry.attributes.position.needsUpdate = true;
-    partMat.opacity = 0.3 + Math.sin(t * 0.7) * 0.2;
+    partMat.opacity = 0.25 + Math.sin(t * 0.5) * 0.15;
 
     // Update colors
     const cols = PAL[st.theme] || PAL.carnival;
-    cabins.forEach((gem, i) => {
+
+    // Gondolas — keep upright & update colors
+    cabinData.forEach((cd, i) => {
       const c = new THREE.Color(cols[i % cols.length]);
-      gem.material.color.copy(c); gem.material.emissive.copy(c);
-      const sv = st.sparkle ? (0.7 + Math.sin(t * 3.5 + i * 1.3) * 0.3 + Math.random() * 0.1) : 1.0;
-      gem.material.emissiveIntensity = st.brightness * sv * 1.5;
-      gem.rotation.y = t * 0.6; gem.rotation.x = t * 0.4;
-      if (gondolas[i]) gondolas[i].material.color.copy(c.clone().multiplyScalar(0.4));
-      const cl = cabinLights[i];
-      cl.light.color.copy(c); cl.light.intensity = st.brightness * sv * (mob ? 0.35 : 0.55);
-      cl.glow.material.color.copy(c); cl.glow.material.opacity = st.brightness * sv * 0.1;
+      // Keep gondola hanging vertically (counter-rotate wheel rotation)
+      cd.hanger.rotation.z = -wheel.rotation.z - cd.angle;
+
+      // Subtle swing
+      const swing = Math.sin(t * 0.8 + i * 0.5) * 0.03;
+      cd.hanger.rotation.z += swing;
+
+      // Update gondola colors
+      const gd = cd.gondola;
+      gd.bodyMat.color.copy(c);
+      const sparkleVal = st.sparkle ? (0.8 + Math.sin(t * 2 + i * 1.3) * 0.2) : 1.0;
+      gd.intLight.color.copy(c.clone().lerp(new THREE.Color(0xffeedd), 0.5));
+      gd.intLight.intensity = st.brightness * sparkleVal * 0.5;
     });
 
+    // LED bars
     bars.forEach((b, i) => {
       const c = new THREE.Color(cols[(i * 2) % cols.length]);
       b.material.color.copy(c); b.material.emissive.copy(c);
-      b.material.emissiveIntensity = st.brightness * (st.sparkle ? (0.5 + Math.sin(t * 4 + i * 2.5) * 0.5) : 0.8) * 1.0;
+      b.material.emissiveIntensity = st.brightness * (st.sparkle ? (0.3 + Math.sin(t * 3 + i * 2.5) * 0.3) : 0.5);
     });
 
+    // Rim LEDs
+    rimLEDs.forEach((led, i) => {
+      const c = new THREE.Color(cols[i % cols.length]);
+      led.material.color.copy(c); led.material.emissive.copy(c);
+      led.material.emissiveIntensity = st.brightness * (st.sparkle ? (0.5 + Math.sin(t * 4 + i * 0.6) * 0.7) : 0.8);
+    });
+
+    // Ground fairy lights
     gBulbs.forEach((b, i) => {
       const c = new THREE.Color(cols[i % cols.length]);
       b.material.color.copy(c); b.material.emissive.copy(c);
-      b.material.emissiveIntensity = st.brightness * (st.sparkle ? (0.3 + Math.sin(t * 2.2 + i * 0.8) * 0.7) : 0.6) * 0.7;
+      b.material.emissiveIntensity = st.brightness * (st.sparkle ? (0.2 + Math.sin(t * 1.8 + i * 0.7) * 0.5) : 0.4);
     });
 
-    centerGem.rotation.y = t; centerGem.rotation.x = t * 0.7;
-    centerGem.material.emissiveIntensity = 0.5 + Math.sin(t * 2) * 0.3;
+    // Hub cap spin
+    axleCap.rotation.y = t * 0.5;
 
-    // Night / day
+    // Night / day mode
     if (st.nightMode) {
-      skyMat.uniforms.topColor.value.set(0x000510);
-      skyMat.uniforms.midColor.value.set(0x0a1628);
-      skyMat.uniforms.botColor.value.set(0x1a2840);
-      gndMat.color.set(0x0d1520);
+      skyMat.uniforms.topColor.value.set(0x000818);
+      skyMat.uniforms.midColor.value.set(0x0c1a35);
+      skyMat.uniforms.botColor.value.set(0x1a2850);
+      skyMat.uniforms.horizonGlow.value.set(0x2a1520);
+      gndMat.color.set(0x0e1822);
+      pavedMat.color.set(0x1a1e28);
       starPts.visible = true; particles.visible = true;
-      warmL.intensity = 0.8;
+      ambLight.intensity = 0.4;
+      keyLight.intensity = 0.6;
+      fillLight.intensity = 0.6;
+      scene.fog.color.set(0x060a18);
+      scene.fog.density = 0.012;
     } else {
       skyMat.uniforms.topColor.value.set(0x4a90d9);
       skyMat.uniforms.midColor.value.set(0x87ceeb);
       skyMat.uniforms.botColor.value.set(0xc8e6f0);
-      gndMat.color.set(0x4a7a4a);
+      skyMat.uniforms.horizonGlow.value.set(0xfff0d0);
+      gndMat.color.set(0x3a6a3a);
+      pavedMat.color.set(0x555560);
       starPts.visible = false; particles.visible = false;
-      warmL.intensity = 0.3;
+      ambLight.intensity = 0.8;
+      keyLight.intensity = 1.0; keyLight.color.set(0xfff5e0);
+      fillLight.intensity = 0.3;
+      scene.fog.color.set(0x87ceeb);
+      scene.fog.density = 0.008;
     }
 
-    // Camera
-    const cy = 4 + Math.sin(t * 0.12) * 0.8;
+    // Camera orbit
+    const cy = 4.5 + Math.sin(t * 0.1) * 1.0;
     cam.position.x = Math.sin(camRef.current) * camDist;
     cam.position.z = Math.cos(camRef.current) * camDist;
     cam.position.y = cy;
-    cam.lookAt(0, 2.2, 0);
+    cam.lookAt(0, 2.5, 0);
 
     ren.render(scene, cam);
   }
@@ -527,19 +857,19 @@ export default function App() {
           color: txt, textTransform: "uppercase", margin: 0,
           textShadow: nm ? "0 0 30px rgba(212,165,116,0.2), 0 2px 4px rgba(0,0,0,0.5)" : "none",
         }}>
-          ✦ La Vuelta al Mundo ✦
+          La Vuelta al Mundo
         </h1>
         <p style={{ fontFamily: "'Palatino Linotype',serif", fontSize: 9, color: txt, opacity: 0.35, margin: "4px 0 0", letterSpacing: 3 }}>
-          DESLIZÁ PARA ORBITAR
+          ARRASTRA PARA ORBITAR
         </p>
       </div>
 
       {/* FABs */}
       <div style={{ position: "absolute", top: "max(14px, env(safe-area-inset-top, 14px))", right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10 }}>
-        <button style={fab(running)} onClick={() => setRunning(!running)}>{running ? "⏸" : "▶"}</button>
-        <button style={fab(soundOn)} onClick={() => setSoundOn(!soundOn)}>{soundOn ? "🔊" : "🔇"}</button>
-        <button style={fab(false)} onClick={() => setNightMode(!nm)}>{nm ? "🌙" : "☀️"}</button>
-        <button style={fab(sparkle)} onClick={() => setSparkle(!sparkle)}>{sparkle ? "✨" : "💡"}</button>
+        <button style={fab(running)} onClick={() => setRunning(!running)}>{running ? "\u23f8" : "\u25b6"}</button>
+        <button style={fab(soundOn)} onClick={() => setSoundOn(!soundOn)}>{soundOn ? "\ud83d\udd0a" : "\ud83d\udd07"}</button>
+        <button style={fab(false)} onClick={() => setNightMode(!nm)}>{nm ? "\ud83c\udf19" : "\u2600\ufe0f"}</button>
+        <button style={fab(sparkle)} onClick={() => setSparkle(!sparkle)}>{sparkle ? "\u2728" : "\ud83d\udca1"}</button>
       </div>
 
       {/* Drawer */}
@@ -565,7 +895,7 @@ export default function App() {
 
           <div style={{ marginBottom: 18 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.4, marginBottom: 10, letterSpacing: 1 }}>
-              <span>VELOCIDAD</span><span>{speed.toFixed(1)}×</span>
+              <span>VELOCIDAD</span><span>{speed.toFixed(1)}x</span>
             </div>
             <input type="range" min="0.05" max="3" step="0.05" value={speed}
               onChange={e => setSpeed(parseFloat(e.target.value))}
@@ -583,10 +913,10 @@ export default function App() {
 
           <div style={{ fontSize: 12, opacity: 0.4, marginBottom: 10, letterSpacing: 1 }}>TEMA</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(105px, 1fr))", gap: 8 }}>
-            {Object.entries(PAL).map(([k, cols]) => (
+            {Object.entries(PAL).map(([k, clrs]) => (
               <button key={k} style={{ ...btn(theme === k), width: "100%", gap: 8, padding: "10px 8px" }} onClick={() => setTheme(k)}>
                 <span style={{ display: "flex", gap: 3 }}>
-                  {cols.slice(0, 4).map((c, j) => (
+                  {clrs.slice(0, 4).map((c, j) => (
                     <span key={j} style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: c, boxShadow: theme === k ? `0 0 8px ${c}` : `0 0 3px ${c}` }} />
                   ))}
                 </span>
